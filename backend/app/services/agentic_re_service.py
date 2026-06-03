@@ -97,12 +97,78 @@ class MultiAgentRelationExtractionService:
 
         return parsed
 
-    def _align_and_clean_judge_output(self, judge_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _align_and_clean_judge_output(self, judge_data: Dict[str, Any], extractor_decision: AgentDecision) -> Dict[str, Any]:
         """对 Judge 输出进行接口规范化与外键对齐。
 
         该方法的目标是在不改变多智能体核心流程的前提下，尽可能把模型输出
         的“脏字段/乱字段”转换为可被 Pydantic 模型接收的标准结构。
         """
+
+        def _is_placeholder_entity_name(value: Any) -> bool:
+            if value is None:
+                return False
+            s = str(value).strip().lower()
+            return bool(re.match(r"^ent[_-]?\d+$", s))
+
+        def _extract_name_from_entity_dict(entity: Dict[str, Any]) -> str:
+            return (
+                entity.get("surface_form")
+                or entity.get("canonical_name")
+                or entity.get("name")
+                or entity.get("text")
+                or entity.get("姓名")
+                or entity.get("地域")
+                or _pick_first_string_value(entity)
+                or ""
+            ).strip()
+
+        extractor_names: Dict[str, str] = {}
+
+        extractor_meta = extractor_decision.metadata if isinstance(extractor_decision.metadata, dict) else {}
+        extractor_entities = extractor_meta.get("entities", [])
+        if isinstance(extractor_entities, list):
+            for ent in extractor_entities:
+                if not isinstance(ent, dict):
+                    continue
+                eid = ent.get("entity_id") or ent.get("id")
+                if not eid:
+                    continue
+                name = _extract_name_from_entity_dict(ent)
+                if name and not _is_placeholder_entity_name(name):
+                    extractor_names[str(eid)] = name
+
+        extractor_candidates = extractor_meta.get("candidate_relations", [])
+        if isinstance(extractor_candidates, list):
+            for rel in extractor_candidates:
+                if not isinstance(rel, dict):
+                    continue
+                h_id = rel.get("head_entity_id") or rel.get("h") or rel.get("head")
+                t_id = rel.get("tail_entity_id") or rel.get("t") or rel.get("tail")
+                h_name = rel.get("head_entity_name") or rel.get("head_name") or rel.get("head_entity") or ""
+                t_name = rel.get("tail_entity_name") or rel.get("tail_name") or rel.get("tail_entity") or ""
+                if h_id and isinstance(h_name, str) and h_name.strip() and not _is_placeholder_entity_name(h_name):
+                    extractor_names.setdefault(str(h_id), h_name.strip())
+                if t_id and isinstance(t_name, str) and t_name.strip() and not _is_placeholder_entity_name(t_name):
+                    extractor_names.setdefault(str(t_id), t_name.strip())
+
+        if isinstance(extractor_decision.accepted_relations, list):
+            for item in extractor_decision.accepted_relations:
+                if not isinstance(item, str):
+                    continue
+                try:
+                    rel = json.loads(item)
+                except Exception:
+                    continue
+                if not isinstance(rel, dict):
+                    continue
+                h_id = rel.get("head_entity_id") or rel.get("h") or rel.get("head")
+                t_id = rel.get("tail_entity_id") or rel.get("t") or rel.get("tail")
+                h_name = rel.get("head_entity_name") or rel.get("head_name") or rel.get("head_entity") or ""
+                t_name = rel.get("tail_entity_name") or rel.get("tail_name") or rel.get("tail_entity") or ""
+                if h_id and isinstance(h_name, str) and h_name.strip() and not _is_placeholder_entity_name(h_name):
+                    extractor_names.setdefault(str(h_id), h_name.strip())
+                if t_id and isinstance(t_name, str) and t_name.strip() and not _is_placeholder_entity_name(t_name):
+                    extractor_names.setdefault(str(t_id), t_name.strip())
 
         def _pick_first_string_value(payload: Dict[str, Any]) -> str:
             for _, v in payload.items():
@@ -143,6 +209,12 @@ class MultiAgentRelationExtractionService:
                     or _pick_first_string_value(entity_dict)
                     or "未知实体"
                 )
+
+                if _is_placeholder_entity_name(surface_form):
+                    recovered = extractor_names.get(str(entity_id))
+                    if recovered:
+                        surface_form = recovered
+
                 canonical_name = entity_dict.get("canonical_name") or surface_form
                 entity_type = entity_dict.get("entity_type") or entity_dict.get("type") or "UNKNOWN"
 
@@ -358,7 +430,7 @@ class MultiAgentRelationExtractionService:
         mermaid_match = re.search(r'```mermaid\s*(.*?)\s*```', response, re.DOTALL)
 
         judge_data = self._extract_json_from_response(response, "Judge")
-        judge_data = self._align_and_clean_judge_output(judge_data)
+        judge_data = self._align_and_clean_judge_output(judge_data, extractor_context)
 
         document_id = chunks[0].document_id if chunks else ""
         judge_data.setdefault("document_id", document_id)
