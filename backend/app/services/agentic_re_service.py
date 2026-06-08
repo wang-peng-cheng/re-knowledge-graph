@@ -305,7 +305,13 @@ class MultiAgentRelationExtractionService:
         judge_data["relations"] = cleaned_relations
         return judge_data
 
-    async def extract(self, document_id: str, chunks: Sequence[CleanedTextChunk]) -> ExtractionResult:
+    async def extract(
+        self,
+        document_id: str,
+        chunks: Sequence[CleanedTextChunk],
+        *,
+        target_schemas: Sequence[str] | None = None,
+    ) -> ExtractionResult:
         """执行完整的多智能体关系抽取主流程。"""
         logger.info("开始多智能体关系抽取，文档: %s", document_id)
         
@@ -326,7 +332,12 @@ class MultiAgentRelationExtractionService:
                        len(critic_decision.rejected_relations))
             
             # Judge 阶段：最终裁决
-            final_result = await self.run_judge_agent(chunks, extractor_decision, critic_decision)
+            final_result = await self.run_judge_agent(
+                chunks,
+                extractor_decision,
+                critic_decision,
+                target_schemas=target_schemas,
+            )
             logger.info("Judge 阶段完成，最终关系: %d 个，实体: %d 个", 
                        len(final_result.relations), len(final_result.entities))
             
@@ -420,9 +431,16 @@ class MultiAgentRelationExtractionService:
         chunks: Sequence[CleanedTextChunk],
         extractor_context: AgentDecision,
         critic_context: AgentDecision,
+        *,
+        target_schemas: Sequence[str] | None = None,
     ) -> ExtractionResult:
         """执行 Judge Agent 的最终裁决阶段。"""
-        messages = await self.build_judge_messages(chunks, extractor_context, critic_context)
+        messages = await self.build_judge_messages(
+            chunks,
+            extractor_context,
+            critic_context,
+            target_schemas=target_schemas,
+        )
         
         response = await self.qwen_client.chat(messages, temperature=0.1)
         
@@ -464,6 +482,11 @@ class MultiAgentRelationExtractionService:
 3. 标注文本中的歧义点和噪声区域
 4. 为后续抽取阶段提供关系类型建议
 
+【语言纪律】：
+- 严禁翻译、意译或改写原文中的实体与关系名称。
+- `suggested_relations` 中给出的关系类型建议必须优先使用原文中出现过的英文字符串或任务既有英文关系标签。
+- 如果无法确定英文关系标签，不要臆造中文关系名。
+
 请以 JSON 格式回复，包含以下字段：
 - rationale: 分析 rationale
 - suggested_relations: 建议关注的关系类型列表
@@ -502,6 +525,21 @@ class MultiAgentRelationExtractionService:
 4. 记录关系证据的文本位置
 5. 结合元数据（情感、地域等）丰富关系属性
 
+【三条强制纪律】：
+1. [语言纪律]
+   - 严禁任何翻译、意译、同义改写或中英互译行为。
+   - 所有实体名称（entities 中的 surface_form / canonical_name）必须 100% 使用原文中实际出现过的英文字符串。
+   - 所有关系类型（relation_type）必须优先直接使用原文或 `Target Relation Types` 列表中的英文字符串。
+   - 如果原文里没有对应英文表述，宁可不抽，也不要自行翻译或创造中文、双语或伪英文名称。
+2. [高置信度-封闭抽取]
+   - 你会收到一个 `Target Relation Types` 列表。
+   - 只要文本证据能够支持，就必须优先从该列表中选择最合适的关系类型进行抽取。
+   - 如果使用了 `Target Relation Types` 列表中的关系类型，confidence 必须严格设置为大于 0.8。
+3. [低置信度-开放发现]
+   - 只有当你发现文本中存在极其关键、但确实无法被 `Target Relation Types` 覆盖的隐藏/演化关系时，才允许自行命名新的英文关系类型。
+   - 这类开放发现关系必须使用英文命名，且 confidence 必须严格设置为小于 0.5。
+   - 对于任何不在目标列表中的关系，禁止给出大于等于 0.5 的置信度。
+
 【极其重要的时间格式要求】：
 - 所有的 observed_at, valid_from, valid_to 必须严格采用 ISO 标准格式（如 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS）。
 - 严禁输出“11月19日”、“今年”等自然语言中文！
@@ -527,8 +565,9 @@ class MultiAgentRelationExtractionService:
   - attributes: 额外属性（如情感、地域等）
   - entities: 识别的实体列表
 - 最高红线警告：
-在输出 entities 列表时，surface_form 必须且只能是该实体在原文中真实的中文名称（如‘张杨’、‘成都市’）！
-绝对禁止将 surface_form 填写为 ent_00x 这种内部 ID。如果原文有名字，就原样输出名字！
+在输出 entities 列表时，surface_form 必须且只能是该实体在原文中真实出现过的英文名称片段！
+绝对禁止将 surface_form 填写为 ent_00x 这种内部 ID，也绝对禁止把英文实体翻译成中文或改写成其他语言。
+若原文中实体名称为英文缩写、全称或带标点形式，必须按原文保留。
 """
             },
             {
@@ -537,7 +576,12 @@ class MultiAgentRelationExtractionService:
 
 {chunk_texts}
 
-Planner 建议关注的关系类型: {planner_suggestions}
+Target Relation Types: {planner_suggestions}
+
+请严格执行以下输出策略：
+1. 对于命中 `Target Relation Types` 的关系，必须优先抽取，且 confidence > 0.8。
+2. 对于不在 `Target Relation Types` 中但你认为极其关键的隐藏关系，可以补充抽取，但关系类型必须用英文命名，且 confidence < 0.5。
+3. 所有实体名和关系类型都必须直接保留原文中的英文字符串，禁止翻译。
 
 请输出 JSON 格式的抽取结果。"""
             }
@@ -584,7 +628,14 @@ Planner 建议关注的关系类型: {planner_suggestions}
             }
         ]
 
-    async def build_judge_messages(self, chunks: Sequence[CleanedTextChunk], extractor_context: AgentDecision, critic_context: AgentDecision) -> List[dict[str, str]]:
+    async def build_judge_messages(
+        self,
+        chunks: Sequence[CleanedTextChunk],
+        extractor_context: AgentDecision,
+        critic_context: AgentDecision,
+        *,
+        target_schemas: Sequence[str] | None = None,
+    ) -> List[dict[str, str]]:
         """构建 Judge Agent 的提示消息。"""
         extractor_relations = json.dumps(extractor_context.accepted_relations, ensure_ascii=False, indent=2)
         critic_review = json.dumps({
@@ -592,18 +643,34 @@ Planner 建议关注的关系类型: {planner_suggestions}
             "rejected": critic_context.rejected_relations,
             "rationale": critic_context.rationale
         }, ensure_ascii=False, indent=2)
+        schema_list = list(target_schemas or [])
+        schema_text = json.dumps(schema_list, ensure_ascii=False, indent=2)
         
         return [
             {
                 "role": "system",
-                "content": """你是最高裁决官（Judge Agent），负责综合各方意见生成最终的知识图谱。
+                "content": """你是一个严格的图谱本体对齐裁决者 (Ontology Alignment Judge)。
 
 你的任务：
 1. 综合 Extractor 的候选关系和 Critic 的审查意见
-2. 生成最终确定的实体和关系列表
-3. 调整关系置信度（考虑 Critic 的惩罚建议）
+2. 将 Extractor 产生的原始自然语言关系名 (relation_type) 归一化映射到给定的【标准关系类别库】(Target Schemas)
+3. 对映射后的关系重新裁决置信度，并确保输出关系的 relation_type 尽可能落在标准库中
 4. 生成 Mermaid 格式的知识图谱可视化代码
 5. 确保输出格式符合 Pydantic 模型要求
+
+【本体映射核心指令】：
+1. Extractor 提取了候选关系及其原始关系名称（可能是开放域自然语言，例如 "participated_in"）。
+2. 你必须对比给定的【标准关系类别库】(Target Schemas)：
+   - 如果 Extractor 的 relation_type 在语义上与标准库中的某项等价或高度相关（例如 "participated_in" 与 "participant" 或 "conflict" 等），必须强制将 relation_type 映射为标准库中的英文词条。
+   - 映射时必须优先选择最贴近的标准词条，禁止随意创造不在标准库中的新 relation_type。
+   - 若出现多个可能映射，请选择最保守、最接近证据文本语义的一项。
+3. 如果语义完全不沾边：
+   - 允许保留原始 relation_type，但必须将 confidence 降级为小于 0.5。
+   - 且不得将此类关系伪装成标准库关系。
+
+【语言纪律】：
+- 禁止任何翻译行为。实体与关系类型必须使用英文字符串。
+- 若候选关系/实体存在中文、翻译或臆造痕迹，应优先剔除或纠正。
 
 【极其重要的时间格式要求】：
 - JSON 中的任何时间字段必须是标准的 YYYY-MM-DD 格式，遇到诸如“11月19日”这样的中文必须纠正或设为 null！
@@ -633,7 +700,10 @@ graph TD
             },
             {
                 "role": "user",
-                "content": f"""请基于以下信息生成最终知识图谱：
+                "content": f"""标准关系类别库 (Target Schemas)：
+{schema_text}
+
+请基于以下信息生成最终知识图谱，并严格执行本体映射：
 
 Extractor 候选关系：
 {extractor_relations}

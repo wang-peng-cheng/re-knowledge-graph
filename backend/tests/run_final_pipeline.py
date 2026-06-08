@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = PROJECT_ROOT / "backend"
+
+for candidate in (PROJECT_ROOT, BACKEND_DIR):
+    candidate_text = str(candidate)
+    if candidate_text not in sys.path:
+        sys.path.insert(0, candidate_text)
 
 from dotenv import load_dotenv
 
@@ -16,6 +27,7 @@ from app.domain.models import CleanedTextChunk, ExtractionResult, RawDocumentRec
 from app.services.agentic_re_service import MultiAgentRelationExtractionService
 from app.services.baseline_re_service import BaselineRelationExtractionService
 from app.services.cleaning_service import TextCleaningService
+from backend.tests.test_support import run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +70,20 @@ def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
     )
+
+
+def parse_args() -> argparse.Namespace:
+    """解析终极联调测试参数。"""
+
+    parser = argparse.ArgumentParser(description="最终联调测试")
+    parser.add_argument("--request-timeout-seconds", type=float, default=600.0, help="Qwen 请求超时秒数")
+    parser.add_argument("--document-timeout-seconds", type=float, default=1800.0, help="联调阶段超时秒数")
+    parser.add_argument("--min-multi-entity-count", type=int, default=1, help="多智能体最小实体数")
+    parser.add_argument("--min-multi-relation-count", type=int, default=1, help="多智能体最小关系数")
+    parser.add_argument("--write-neo4j", action="store_true", help="显式启用 Neo4j 写入")
+    return parser.parse_args()
 
 
 def build_test_record() -> RawDocumentRecord:
@@ -304,8 +329,9 @@ def build_deterministic_mermaid(result: ExtractionResult) -> str:
 async def main() -> None:
     """执行最终联调测试主流程。"""
 
+    args = parse_args()
     configure_logging()
-    load_dotenv()
+    load_dotenv(BACKEND_DIR / ".env")
 
     os.environ["HTTP_PROXY"] = ""
     os.environ["HTTPS_PROXY"] = ""
@@ -317,7 +343,13 @@ async def main() -> None:
     record = build_test_record()
 
     cleaner = TextCleaningService()
-    chunks = await cleaner.clean_document(record)
+    chunks = await run_with_timeout(
+        "最终联调清洗阶段",
+        cleaner.clean_document(record),
+        args.document_timeout_seconds,
+    )
+    if len(chunks) <= 0:
+        raise AssertionError("最终联调测试必须至少生成 1 个文本块。")
     dump_chunks_preview(chunks)
 
     settings = get_settings()
@@ -325,6 +357,7 @@ async def main() -> None:
         base_url=os.getenv("QWEN_BASE_URL", settings.qwen_base_url),
         api_key=os.getenv("QWEN_API_KEY", settings.qwen_api_key),
         model=os.getenv("QWEN_MODEL", settings.qwen_model),
+        timeout_seconds=args.request_timeout_seconds,
     )
 
     baseline_service = BaselineRelationExtractionService(qwen_client=qwen_client)
@@ -336,14 +369,33 @@ async def main() -> None:
     try:
         print("\n========== 擂台测试：Baseline ==========")
         try:
-            baseline_result = await baseline_service.extract(record.document_id, chunks)
+            baseline_result = await run_with_timeout(
+                "Baseline 抽取",
+                baseline_service.extract(record.document_id, chunks),
+                args.document_timeout_seconds,
+            )
             format_relation_count_report("Baseline", baseline_result)
             print_time_quality_report("Baseline", baseline_result)
         except Exception as exc:
             print(f"Baseline 抽取失败，这正符合脏数据场景下单体模型脆弱性的实验预期: {exc}")
 
         print("\n========== 擂台测试：Multi-Agent ==========")
-        multi_result = await multi_agent_service.extract(record.document_id, chunks)
+        multi_result = await run_with_timeout(
+            "Multi-Agent 抽取",
+            multi_agent_service.extract(record.document_id, chunks),
+            args.document_timeout_seconds,
+        )
+        if len(multi_result.entities) < args.min_multi_entity_count:
+            raise AssertionError(
+                f"Multi-Agent 实体数不足，要求至少 {args.min_multi_entity_count}，实际为 {len(multi_result.entities)}。"
+            )
+        if len(multi_result.relations) < args.min_multi_relation_count:
+            raise AssertionError(
+                f"Multi-Agent 关系数不足，要求至少 {args.min_multi_relation_count}，实际为 {len(multi_result.relations)}。"
+            )
+        invalid_relation_count = len(find_relations_with_chinese_time(multi_result.relations))
+        if invalid_relation_count != 0:
+            raise AssertionError(f"Multi-Agent 输出包含 {invalid_relation_count} 条未规范化中文时间关系。")
         format_relation_count_report("Multi-Agent", multi_result)
         print_time_quality_report("Multi-Agent", multi_result)
 
@@ -351,9 +403,13 @@ async def main() -> None:
         mermaid_code = build_deterministic_mermaid(multi_result)
         print(mermaid_code)
 
-        print("\n========== Neo4j 写入 ==========")
-        write_to_neo4j(multi_result)
-        print("Multi-Agent 最终干净图谱已成功写入本地 Neo4j。")
+        if args.write_neo4j:
+            print("\n========== Neo4j 写入 ==========")
+            write_to_neo4j(multi_result)
+            print("Multi-Agent 最终干净图谱已成功写入本地 Neo4j。")
+        else:
+            print("\n========== Neo4j 写入 ==========")
+            print("默认跳过 Neo4j 写入；如需落库，请显式传入 --write-neo4j。")
 
         print("\n========== 横向对比总结 ==========")
         if baseline_result is not None:

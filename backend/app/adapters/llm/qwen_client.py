@@ -22,7 +22,7 @@ class QwenClient:
     - 支持标准的 OpenAI 格式消息输入
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
+    def __init__(self, base_url: str, api_key: str, model: str, *, timeout_seconds: float = 900.0) -> None:
         """初始化 Qwen 模型访问客户端。
 
         Args:
@@ -33,7 +33,8 @@ class QwenClient:
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.model = model
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(900.0))
+        self.timeout_seconds = timeout_seconds
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds))
 
     async def chat(
         self,
@@ -77,7 +78,7 @@ class QwenClient:
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=900.0
+                timeout=self.timeout_seconds
             )
             response.raise_for_status()
             
@@ -101,7 +102,8 @@ class QwenClient:
             raise
         except TimeoutException as e:
             logger.error(
-                "Qwen 模型请求超时，超时时间: 900 秒",
+                "Qwen 模型请求超时，超时时间: %.1f 秒",
+                self.timeout_seconds,
                 exc_info=True
             )
             raise
@@ -128,7 +130,7 @@ class QwenClient:
             response = await self.client.get(
                 f"{self.base_url}/models",
                 headers=headers,
-                timeout=10.0
+                timeout=min(self.timeout_seconds, 10.0)
             )
             
             return response.status_code == 200

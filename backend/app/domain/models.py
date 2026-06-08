@@ -183,9 +183,9 @@ class TemporalRelation(BaseModel):
     tail_entity_id: str
     relation_type: str
     confidence: float
-    observed_at: Optional[datetime] = None
-    valid_from: Optional[datetime] = None
-    valid_to: Optional[datetime] = None
+    observed_at: Optional[str] = None
+    valid_from: Optional[str] = None
+    valid_to: Optional[str] = None
     evidence_chunk_ids: List[str] = Field(default_factory=list)
     evidence_texts: List[str] = Field(default_factory=list)
     agent_votes: Dict[str, float] = Field(default_factory=dict)
@@ -225,6 +225,7 @@ class ExtractionResult(BaseModel):
         entities: 抽取得到的实体列表。
         relations: 抽取得到的时序关系列表。
         agent_trace: 多智能体流程中的关键决策轨迹。
+        metadata: 抽取阶段的附加元数据，例如 Mermaid 图、裁决说明与运行统计。
         status: 当前抽取结果所对应的处理状态。
     """
 
@@ -232,6 +233,7 @@ class ExtractionResult(BaseModel):
     entities: List[EntityMention] = Field(default_factory=list)
     relations: List[TemporalRelation] = Field(default_factory=list)
     agent_trace: List[AgentDecision] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     status: ProcessingStatus = ProcessingStatus.EXTRACTED
 
 

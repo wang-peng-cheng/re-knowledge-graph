@@ -1,44 +1,80 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
 import os
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = PROJECT_ROOT / "backend"
+
+for candidate in (PROJECT_ROOT, BACKEND_DIR):
+    candidate_text = str(candidate)
+    if candidate_text not in sys.path:
+        sys.path.insert(0, candidate_text)
+
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
-os.environ["NO_PROXY"] = "*"  # 强制要求所有请求直连，不经过任何代理
+os.environ["NO_PROXY"] = "*"
 
-import asyncio
 from dotenv import load_dotenv
+
 from app.adapters.llm.qwen_client import QwenClient
+from backend.tests.test_support import assert_non_empty_text, run_with_timeout
 
-# 强制加载本地的 .env 密码本
-load_dotenv()
+load_dotenv(BACKEND_DIR / ".env")
 
-async def main():
-    print("🚀 正在初始化 Qwen 客户端...")
-    
-    # 从环境变量读取配置，如果没读到就用默认值兜底
+
+def parse_args() -> argparse.Namespace:
+    """解析 Qwen 连通性测试参数。"""
+
+    parser = argparse.ArgumentParser(description="Qwen 连通性测试")
+    parser.add_argument("--request-timeout-seconds", type=float, default=120.0, help="请求超时秒数")
+    parser.add_argument("--min-response-length", type=int, default=10, help="最小响应字符数")
+    return parser.parse_args()
+
+
+async def main() -> None:
+    """执行 Qwen 连通性测试。"""
+
+    args = parse_args()
+    print("正在初始化 Qwen 客户端...")
+
     base_url = os.getenv("QWEN_BASE_URL", "http://10.109.118.166:11434/v1")
     api_key = os.getenv("QWEN_API_KEY", "sk-123456")
-    model_name = os.getenv("QWEN_MODEL", "qwen") # 注意：这里要跟你内网的实际模型名一致
-    
-    # 适配 DeepSeek 写的标准初始化方式
-    client = QwenClient(base_url=base_url, api_key=api_key, model=model_name)
-    
+    model_name = os.getenv("QWEN_MODEL", "qwen3:8b")
+
+    client = QwenClient(
+        base_url=base_url,
+        api_key=api_key,
+        model=model_name,
+        timeout_seconds=args.request_timeout_seconds,
+    )
     test_messages = [
         {"role": "system", "content": "你是一个严谨的 AI 助手。"},
-        {"role": "user", "content": "请用一句话证明你已经连线成功，并报出你的模型名字。"}
+        {"role": "user", "content": "请用一句话证明你已经连线成功，并报出你的模型名字。"},
     ]
-    
-    print(f"📡 正在向 {base_url} 发送请求...")
+
+    print(f"正在向 {base_url} 发送请求...")
     try:
-        # 调用 DeepSeek 写的 chat 方法
-        response = await client.chat(test_messages)
-        print("\n🎉 连接成功！Qwen 的回复是：")
+        response = await run_with_timeout(
+            "Qwen 连通性测试",
+            client.chat(test_messages),
+            args.request_timeout_seconds,
+        )
+        assert_non_empty_text(
+            response,
+            label="Qwen 连通性响应",
+            min_length=args.min_response_length,
+        )
+        print("\n连接成功，Qwen 响应如下：")
         print("-" * 40)
         print(response)
         print("-" * 40)
-    except Exception as e:
-        print(f"\n❌ 连接失败，请检查实验室网络或把报错发给导师：\n{e}")
     finally:
-        # 优雅地关闭连接
         await client.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

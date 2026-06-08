@@ -1,0 +1,15 @@
+mode: v2_full
+dataset: data/raw/dev.json
+relation_mapping_path: data/raw/rel_info.json
+docs: 10
+batch_size: 2
+max_processes: 2
+max_concurrency: 4
+gpu_memory_threshold: 1.0
+document_timeout_seconds: 1800.0
+suite_timeout_seconds: 21600.0
+request_timeout_seconds: 900.0
+experiment_group_id: paper1-v2-full
+qwen_base_url: null
+qwen_api_key: null
+qwen_model: null
