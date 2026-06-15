@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_LLM_PROVIDERS: tuple[str, ...] = ("qwen", "glm", "deepseek")
 
 
 class AppSettings(BaseSettings):
@@ -36,9 +38,16 @@ class AppSettings(BaseSettings):
         neo4j_username: Neo4j 用户名。
         neo4j_password: Neo4j 密码。
         neo4j_database: Neo4j 使用的数据库名。
+        llm_provider: 当前默认使用的大模型提供商。
         qwen_base_url: 本地或内网 Qwen API 基础地址。
         qwen_api_key: Qwen API 密钥或访问令牌。
         qwen_model: 默认使用的 Qwen 模型名称。
+        glm_base_url: 智谱 GLM API 基础地址。
+        glm_api_key: 智谱 GLM API 密钥或访问令牌。
+        glm_model: 默认使用的 GLM 模型名称。
+        deepseek_base_url: DeepSeek API 基础地址。
+        deepseek_api_key: DeepSeek API 密钥或访问令牌。
+        deepseek_model: 默认使用的 DeepSeek 模型名称。
     """
 
     model_config = SettingsConfigDict(
@@ -64,9 +73,25 @@ class AppSettings(BaseSettings):
     neo4j_password: str = Field(alias="NEO4J_PASSWORD")
     neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
 
+    llm_provider: str = Field(default="qwen", alias="LLM_PROVIDER")
     qwen_base_url: str = Field(default="http://10.109.118.166:11434/v1", alias="QWEN_BASE_URL")
-    qwen_api_key: str = Field(alias="QWEN_API_KEY")
+    qwen_api_key: str | None = Field(default=None, alias="QWEN_API_KEY")
     qwen_model: str = Field(default="qwen3:8b", alias="QWEN_MODEL")
+    glm_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4",
+        validation_alias=AliasChoices("GLM_BASE_URL", "GLM51_BASE_URL"),
+    )
+    glm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GLM_API_KEY", "GLM51_API_KEY"),
+    )
+    glm_model: str = Field(
+        default="glm-5.1",
+        validation_alias=AliasChoices("GLM_MODEL", "GLM51_MODEL"),
+    )
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
+    deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
+    deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")
 
     def build_mysql_dsn(self) -> str:
         """构建 MySQL 数据源连接字符串。
@@ -104,9 +129,52 @@ class AppSettings(BaseSettings):
             "neo4j_username": self.neo4j_username,
             "neo4j_password": "***",
             "neo4j_database": self.neo4j_database,
+            "llm_provider": self.resolve_llm_provider(),
             "qwen_base_url": self.qwen_base_url,
             "qwen_api_key": "***",
             "qwen_model": self.qwen_model,
+            "glm_base_url": self.glm_base_url,
+            "glm_api_key": "***",
+            "glm_model": self.glm_model,
+            "deepseek_base_url": self.deepseek_base_url,
+            "deepseek_api_key": "***",
+            "deepseek_model": self.deepseek_model,
+        }
+
+    def resolve_llm_provider(self, provider: str | None = None) -> str:
+        """解析并校验当前使用的大模型提供商。"""
+
+        resolved_provider = (provider or self.llm_provider or "qwen").strip().lower()
+        if resolved_provider not in SUPPORTED_LLM_PROVIDERS:
+            raise ValueError(
+                f"不支持的 LLM_PROVIDER: {resolved_provider}，允许值为: {', '.join(SUPPORTED_LLM_PROVIDERS)}"
+            )
+        return resolved_provider
+
+    def resolve_llm_config(self, provider: str | None = None) -> dict[str, str | None]:
+        """按提供商返回标准化 LLM 连接配置。"""
+
+        resolved_provider = self.resolve_llm_provider(provider)
+        provider_configs: dict[str, dict[str, str | None]] = {
+            "qwen": {
+                "base_url": self.qwen_base_url,
+                "api_key": self.qwen_api_key,
+                "model": self.qwen_model,
+            },
+            "glm": {
+                "base_url": self.glm_base_url,
+                "api_key": self.glm_api_key,
+                "model": self.glm_model,
+            },
+            "deepseek": {
+                "base_url": self.deepseek_base_url,
+                "api_key": self.deepseek_api_key,
+                "model": self.deepseek_model,
+            },
+        }
+        return {
+            "provider": resolved_provider,
+            **provider_configs[resolved_provider],
         }
 
 

@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, List, Sequence
 from uuid import uuid4
 
-from app.adapters.llm.qwen_client import QwenClient
+from app.adapters.llm.base import LLMClientProtocol
 from app.domain.models import AgentDecision, CleanedTextChunk, EntityMention, ExtractionResult, TemporalRelation
 
 logger = logging.getLogger(__name__)
@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 class MultiAgentRelationExtractionService:
     """多智能体零样本关系抽取服务实现。"""
 
-    def __init__(self, qwen_client: QwenClient) -> None:
-        self.qwen_client = qwen_client
+    def __init__(self, llm_client: LLMClientProtocol) -> None:
+        self.llm_client = llm_client
+        # 保留兼容别名，避免现有调用点和调试脚本失效。
+        self.qwen_client = llm_client
 
     def _extract_json_from_response(self, response: str, agent_name: str) -> Dict[str, Any]:
         """从大模型响应中稳健提取并解析 JSON。

@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any, Dict, List, Sequence
 
-from app.adapters.llm.qwen_client import QwenClient
+from app.adapters.llm.base import LLMClientProtocol
 from app.domain.models import AgentDecision, CleanedTextChunk, EntityMention, ExtractionResult, TemporalRelation
 
 logger = logging.getLogger(__name__)
@@ -19,14 +19,15 @@ class BaselineRelationExtractionService:
     一次性提交给大模型，观察单体模型在脏数据场景下的真实表现。
     """
 
-    def __init__(self, qwen_client: QwenClient) -> None:
+    def __init__(self, llm_client: LLMClientProtocol) -> None:
         """初始化 Baseline 关系抽取服务。
 
         Args:
-            qwen_client: 大模型访问客户端。
+            llm_client: 大模型访问客户端。
         """
 
-        self.qwen_client = qwen_client
+        self.llm_client = llm_client
+        self.qwen_client = llm_client
 
     async def extract(self, document_id: str, chunks: Sequence[CleanedTextChunk]) -> ExtractionResult:
         """执行单次 Prompt 的 Baseline 关系抽取。

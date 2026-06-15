@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.adapters.llm.qwen_client import QwenClient
+from app.adapters.llm.base import LLMClientProtocol
 from app.domain.models import ReasoningHypothesis, ReasoningRequest, ReasoningResult, TemporalGraphSnapshot
 from app.repositories.graph_repository import TemporalGraphRepository
 
@@ -22,16 +22,17 @@ class TemporalReasoningService:
     当前类仅定义架构骨架，不实现任何具体业务逻辑。
     """
 
-    def __init__(self, repository: TemporalGraphRepository, qwen_client: QwenClient) -> None:
+    def __init__(self, repository: TemporalGraphRepository, llm_client: LLMClientProtocol) -> None:
         """初始化时序知识图谱推理服务。
 
         Args:
             repository: 时态属性图仓储对象，用于加载图快照和推理上下文。
-            qwen_client: 大模型访问客户端，用于执行未来关系外推与结果解释。
+            llm_client: 大模型访问客户端，用于执行未来关系外推与结果解释。
         """
 
         self.repository = repository
-        self.qwen_client = qwen_client
+        self.llm_client = llm_client
+        self.qwen_client = llm_client
 
     async def extrapolate(self, request: ReasoningRequest) -> ReasoningResult:
         """执行完整的未来关系外推主流程。

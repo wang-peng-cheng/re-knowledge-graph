@@ -9,14 +9,8 @@ gpu_memory_threshold: 1.0
 document_timeout_seconds: 1800.0
 suite_timeout_seconds: 21600.0
 request_timeout_seconds: 900.0
-experiment_group_id: paper1-v2-full
+experiment_group_id: qwen-batch
 llm_provider: qwen
 qwen_base_url: null
 qwen_api_key: null
-qwen_model: null
-glm_base_url: null
-glm_api_key: null
-glm_model: null
-deepseek_base_url: null
-deepseek_api_key: null
-deepseek_model: null
+qwen_model: qwen3:8b

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any, Sequence, cast
@@ -20,7 +19,8 @@ for candidate in (PROJECT_ROOT, BACKEND_DIR):
 
 from dotenv import load_dotenv
 
-from app.adapters.llm.qwen_client import QwenClient
+from app.adapters.llm.base import LLMClientProtocol
+from app.adapters.llm.factory import build_llm_client_from_environment, build_llm_client_from_settings
 from app.core.config import get_settings
 from app.domain.models import CleanedTextChunk, ExtractionResult
 from app.services.agentic_re_service import MultiAgentRelationExtractionService
@@ -39,6 +39,7 @@ from backend.tests.run_docred_evaluation import (
 )
 from backend.tests.test_support import (
     AVAILABLE_MODES,
+    AVAILABLE_LLM_PROVIDERS,
     MODE_LABELS,
     ExperimentPaths,
     SuiteConfig,
@@ -49,7 +50,6 @@ from backend.tests.test_support import (
     chunked,
     create_experiment_paths,
     ensure_default_raw_assets,
-    ensure_qwen_env_defaults,
     load_yaml_config,
     run_with_timeout,
     setup_run_logger,
@@ -115,11 +115,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-memory-threshold", type=float, default=None, help="GPU 显存占用阈值，范围 (0,1]")
     parser.add_argument("--document-timeout-seconds", type=float, default=None, help="单文档超时秒数")
     parser.add_argument("--suite-timeout-seconds", type=float, default=None, help="整套实验超时秒数")
-    parser.add_argument("--request-timeout-seconds", type=float, default=None, help="Qwen HTTP 请求超时秒数")
+    parser.add_argument("--request-timeout-seconds", type=float, default=None, help="LLM HTTP 请求超时秒数")
     parser.add_argument("--experiment-group-id", type=str, default=None, help="显式指定实验分组标识")
+    parser.add_argument("--llm-provider", choices=AVAILABLE_LLM_PROVIDERS, default=None, help="底层大模型提供商")
     parser.add_argument("--qwen-base-url", type=str, default=None, help="覆盖 QWEN_BASE_URL")
     parser.add_argument("--qwen-api-key", type=str, default=None, help="覆盖 QWEN_API_KEY")
     parser.add_argument("--qwen-model", type=str, default=None, help="覆盖 QWEN_MODEL")
+    parser.add_argument("--glm-base-url", type=str, default=None, help="覆盖 GLM_BASE_URL / GLM51_BASE_URL")
+    parser.add_argument("--glm-api-key", type=str, default=None, help="覆盖 GLM_API_KEY / GLM51_API_KEY")
+    parser.add_argument("--glm-model", type=str, default=None, help="覆盖 GLM_MODEL / GLM51_MODEL")
+    parser.add_argument("--deepseek-base-url", type=str, default=None, help="覆盖 DEEPSEEK_BASE_URL")
+    parser.add_argument("--deepseek-api-key", type=str, default=None, help="覆盖 DEEPSEEK_API_KEY")
+    parser.add_argument("--deepseek-model", type=str, default=None, help="覆盖 DEEPSEEK_MODEL")
     return parser.parse_args()
 
 
@@ -139,9 +146,16 @@ def namespace_to_cli_values(args: argparse.Namespace) -> dict[str, Any]:
         "suite_timeout_seconds": args.suite_timeout_seconds,
         "request_timeout_seconds": args.request_timeout_seconds,
         "experiment_group_id": args.experiment_group_id,
+        "llm_provider": args.llm_provider,
         "qwen_base_url": args.qwen_base_url,
         "qwen_api_key": args.qwen_api_key,
         "qwen_model": args.qwen_model,
+        "glm_base_url": args.glm_base_url,
+        "glm_api_key": args.glm_api_key,
+        "glm_model": args.glm_model,
+        "deepseek_base_url": args.deepseek_base_url,
+        "deepseek_api_key": args.deepseek_api_key,
+        "deepseek_model": args.deepseek_model,
     }
 
 
@@ -192,29 +206,23 @@ def build_target_schemas(relation_mapping: dict[str, str]) -> list[str]:
     return sorted({str(value).strip() for value in relation_mapping.values() if str(value).strip()})
 
 
-def build_qwen_client(config: SuiteConfig) -> QwenClient:
-    """Build the Qwen client with suite-level timeout overrides."""
+def build_llm_client(config: SuiteConfig) -> LLMClientProtocol:
+    """Build the configured LLM client with suite-level timeout overrides."""
 
     load_dotenv(BACKEND_DIR / ".env")
-    ensure_qwen_env_defaults(config)
-
     try:
         settings = get_settings()
-        return QwenClient(
-            base_url=os.getenv("QWEN_BASE_URL", settings.qwen_base_url),
-            api_key=os.getenv("QWEN_API_KEY", settings.qwen_api_key),
-            model=os.getenv("QWEN_MODEL", settings.qwen_model),
+        return build_llm_client_from_settings(
+            settings=settings,
+            provider=config.llm_provider,
             timeout_seconds=config.request_timeout_seconds,
+            overrides=config.resolve_llm_overrides(),
         )
     except Exception:
-        base_url = os.getenv("QWEN_BASE_URL", config.qwen_base_url or "http://10.109.118.166:11434/v1")
-        api_key = os.getenv("QWEN_API_KEY", config.qwen_api_key or "EMPTY")
-        model = os.getenv("QWEN_MODEL", config.qwen_model or "qwen3:8b")
-        return QwenClient(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
+        return build_llm_client_from_environment(
+            config.llm_provider,
             timeout_seconds=config.request_timeout_seconds,
+            overrides=config.resolve_llm_overrides(),
         )
 
 
@@ -326,9 +334,10 @@ async def execute_suite_run(
         raise AssertionError("实验数据集为空，至少需要 1 篇文档。")
 
     logger.info(
-        "启动消融实验 mode=%s(%s) docs=%d batch_size=%d max_processes=%d max_concurrency=%d dataset=%s",
+        "启动消融实验 mode=%s(%s) llm_provider=%s docs=%d batch_size=%d max_processes=%d max_concurrency=%d dataset=%s",
         config.mode,
         MODE_LABELS[config.mode],
+        config.llm_provider,
         len(target_docs),
         config.batch_size,
         config.max_processes,
@@ -337,8 +346,8 @@ async def execute_suite_run(
     )
 
     cleaning_service = TextCleaningService()
-    qwen_client = build_qwen_client(config)
-    extraction_service = MultiAgentRelationExtractionService(qwen_client=qwen_client)
+    llm_client = build_llm_client(config)
+    extraction_service = MultiAgentRelationExtractionService(llm_client=llm_client)
     per_doc_results: list[dict[str, Any]] = []
 
     try:
@@ -405,7 +414,7 @@ async def execute_suite_run(
             ]
             per_doc_results.extend(await asyncio.gather(*tasks))
     finally:
-        await qwen_client.close()
+        await llm_client.close()
 
     success_results = [item for item in per_doc_results if item.get("status") == "success"]
     if not success_results:
@@ -417,6 +426,8 @@ async def execute_suite_run(
     summary = {
         "mode": config.mode,
         "mode_label": MODE_LABELS[config.mode],
+        "llm_provider": config.llm_provider,
+        "llm_model": llm_client.model,
         "document_count": len(target_docs),
         "success_count": len(success_results),
         "failure_count": summarize_failure_counts(per_doc_results),

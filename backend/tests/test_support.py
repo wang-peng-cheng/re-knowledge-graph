@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-"""Shared utilities for experiment runners under ``backend/tests``.
-
-This module centralizes configuration loading, runtime validation, structured
-logging, result archiving, timeout guards, and dataset registration so that all
-test entry scripts follow one reproducible execution contract.
+"""这个函数是：
+    提供实验运行器的共享工具函数。
 """
 
 import asyncio
@@ -31,6 +28,7 @@ ROOT_DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = ROOT_DATA_DIR / "raw"
 EVAL_RESULTS_DIR = ROOT_DATA_DIR / "eval_results"
 LEGACY_DATA_DIR = BACKEND_DIR / "data"
+AVAILABLE_LLM_PROVIDERS: tuple[str, ...] = ("qwen", "glm", "deepseek")
 
 AVAILABLE_MODES: tuple[str, ...] = (
     "baseline_v1",
@@ -69,15 +67,28 @@ class SuiteConfig:
     request_timeout_seconds: float = 900.0
     experiment_group_id: str | None = None
     output_root: str = "data/eval_results"
+    llm_provider: str = "qwen"
     qwen_base_url: str | None = None
     qwen_api_key: str | None = None
     qwen_model: str | None = None
+    glm_base_url: str | None = None
+    glm_api_key: str | None = None
+    glm_model: str | None = None
+    deepseek_base_url: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_model: str | None = None
 
     def validate(self) -> None:
         """Validate runtime configuration before execution starts."""
 
         if self.mode not in AVAILABLE_MODES:
             raise ValueError(f"非法实验模式: {self.mode}，允许值为: {', '.join(AVAILABLE_MODES)}")
+        normalized_provider = self.llm_provider.strip().lower()
+        if normalized_provider not in AVAILABLE_LLM_PROVIDERS:
+            raise ValueError(
+                f"非法 llm_provider: {self.llm_provider}，允许值为: {', '.join(AVAILABLE_LLM_PROVIDERS)}"
+            )
+        self.llm_provider = normalized_provider
         if self.docs <= 0:
             raise ValueError("docs 必须为正整数。")
         if self.batch_size <= 0:
@@ -101,6 +112,28 @@ class SuiteConfig:
         payload = asdict(self)
         payload["mode_label"] = MODE_LABELS[self.mode]
         return payload
+
+    def resolve_llm_overrides(self) -> dict[str, str | None]:
+        """Return provider-specific runtime overrides for the current suite config."""
+
+        provider_overrides = {
+            "qwen": {
+                "base_url": self.qwen_base_url,
+                "api_key": self.qwen_api_key,
+                "model": self.qwen_model,
+            },
+            "glm": {
+                "base_url": self.glm_base_url,
+                "api_key": self.glm_api_key,
+                "model": self.glm_model,
+            },
+            "deepseek": {
+                "base_url": self.deepseek_base_url,
+                "api_key": self.deepseek_api_key,
+                "model": self.deepseek_model,
+            },
+        }
+        return dict(provider_overrides[self.llm_provider])
 
 
 @dataclass(slots=True)
@@ -423,19 +456,6 @@ def summarize_failure_counts(results: Iterable[Mapping[str, Any]]) -> int:
     """Count how many per-document results contain a processing error marker."""
 
     return sum(1 for item in results if item.get("status") == "failed")
-
-
-def ensure_qwen_env_defaults(config: SuiteConfig) -> None:
-    """Populate runtime environment for Qwen settings when explicitly configured."""
-
-    env_updates = {
-        "QWEN_BASE_URL": config.qwen_base_url,
-        "QWEN_API_KEY": config.qwen_api_key,
-        "QWEN_MODEL": config.qwen_model,
-    }
-    for key, value in env_updates.items():
-        if value:
-            os.environ[key] = value
 
 
 def build_manifest_payload(

@@ -15,7 +15,7 @@ for candidate in (PROJECT_ROOT, BACKEND_DIR):
     if candidate_text not in sys.path:
         sys.path.insert(0, candidate_text)
 
-from backend.tests.run_ablation_suite import AVAILABLE_MODES, SuiteConfig, run_suite_from_config
+from backend.tests.run_ablation_suite import AVAILABLE_LLM_PROVIDERS, AVAILABLE_MODES, SuiteConfig, run_suite_from_config
 from backend.tests.test_support import DEFAULT_DATASET, DEFAULT_REL_INFO, ensure_default_raw_assets
 
 
@@ -45,6 +45,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suite-timeout-seconds", type=float, default=7200.0, help="整套实验超时秒数")
     parser.add_argument("--request-timeout-seconds", type=float, default=600.0, help="Qwen 请求超时秒数")
     parser.add_argument("--gpu-memory-threshold", type=float, default=1.0, help="GPU 显存占比阈值")
+    parser.add_argument("--llm-provider", choices=AVAILABLE_LLM_PROVIDERS, default="qwen", help="底层大模型提供商")
+    parser.add_argument("--qwen-base-url", type=str, default=None, help="覆盖 QWEN_BASE_URL")
+    parser.add_argument("--qwen-api-key", type=str, default=None, help="覆盖 QWEN_API_KEY")
+    parser.add_argument("--qwen-model", type=str, default=None, help="覆盖 QWEN_MODEL")
+    parser.add_argument("--glm-base-url", type=str, default=None, help="覆盖 GLM_BASE_URL / GLM51_BASE_URL")
+    parser.add_argument("--glm-api-key", type=str, default=None, help="覆盖 GLM_API_KEY / GLM51_API_KEY")
+    parser.add_argument("--glm-model", type=str, default=None, help="覆盖 GLM_MODEL / GLM51_MODEL")
+    parser.add_argument("--deepseek-base-url", type=str, default=None, help="覆盖 DEEPSEEK_BASE_URL")
+    parser.add_argument("--deepseek-api-key", type=str, default=None, help="覆盖 DEEPSEEK_API_KEY")
+    parser.add_argument("--deepseek-model", type=str, default=None, help="覆盖 DEEPSEEK_MODEL")
     return parser.parse_args()
 
 
@@ -66,6 +76,16 @@ async def run_batch(args: argparse.Namespace) -> None:
             request_timeout_seconds=args.request_timeout_seconds,
             gpu_memory_threshold=args.gpu_memory_threshold,
             experiment_group_id=f"smoke-{mode}",
+            llm_provider=args.llm_provider,
+            qwen_base_url=args.qwen_base_url,
+            qwen_api_key=args.qwen_api_key,
+            qwen_model=args.qwen_model,
+            glm_base_url=args.glm_base_url,
+            glm_api_key=args.glm_api_key,
+            glm_model=args.glm_model,
+            deepseek_base_url=args.deepseek_base_url,
+            deepseek_api_key=args.deepseek_api_key,
+            deepseek_model=args.deepseek_model,
         )
         config.validate()
         paths = await run_suite_from_config(config)
